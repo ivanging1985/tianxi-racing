@@ -13,7 +13,7 @@ export type CsvRow = Record<string, string>;
 export function parseCsv(path: string): CsvRow[] {
   let raw = readFileSync(path, 'utf-8');
   if (raw.charCodeAt(0) === 0xfeff) raw = raw.slice(1);
-  const lines = raw.split(/\r?\n/).filter((l) => l.length > 0);
+  const lines = splitCsvRecords(raw).filter((l) => l.length > 0);
   if (lines.length === 0) return [];
 
   const headers = splitCsvLine(lines[0]);
@@ -28,6 +28,31 @@ export function parseCsv(path: string): CsvRow[] {
     rows.push(row);
   }
   return rows;
+}
+
+function splitCsvRecords(raw: string): string[] {
+  const records: string[] = [];
+  let current = '';
+  let inQuotes = false;
+
+  for (let i = 0; i < raw.length; i++) {
+    const c = raw[i];
+    if (c === '"') {
+      current += c;
+      if (inQuotes && raw[i + 1] === '"') {
+        current += raw[++i];
+      } else {
+        inQuotes = !inQuotes;
+      }
+    } else if (c === '\n' && !inQuotes) {
+      records.push(current.replace(/\r$/, ''));
+      current = '';
+    } else {
+      current += c;
+    }
+  }
+  if (current.length > 0) records.push(current.replace(/\r$/, ''));
+  return records;
 }
 
 function splitCsvLine(line: string): string[] {

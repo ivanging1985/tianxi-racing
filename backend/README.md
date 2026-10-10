@@ -25,3 +25,9 @@ Elo 快照存於 D1。賽果本身按日同步；若快照缺月，由 `d1_fill_
 
 - Cloudflare Workers（Hono）+ D1
 - TX-Oracle v3.2：LambdaRank + Elo v12 + 因子補償
+
+## Upstream CSV sync
+
+To seed a fork's Azure SQL database from the public upstream CSV repository and
+keep it updated daily, see
+[the setup guide](docs/UPSTREAM_CSV_AZURE_SQL_SYNC.md).

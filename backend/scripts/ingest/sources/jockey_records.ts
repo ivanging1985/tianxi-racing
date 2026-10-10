@@ -43,6 +43,13 @@ export function ingestJockeyRecords(
        source_commit = excluded.source_commit,
        ingested_at = datetime('now')`,
   );
+  const upsertJockey = db.prepare(
+    `INSERT INTO jockeys (id, name_en, name_ch)
+     VALUES (?, ?, ?)
+     ON CONFLICT(id) DO UPDATE SET
+       name_en = excluded.name_en,
+       name_ch = excluded.name_ch`,
+  );
 
   for (const file of files) {
     stats.jockeysProcessed++;
@@ -94,6 +101,10 @@ export function ingestJockeyRecords(
     }
 
     const tx = db.transaction(() => {
+      const jockey = [...seasons.values()][0];
+      if (jockey) {
+        upsertJockey.run(`jockey_${jockey.jockeyCode}`, jockey.jockeyName, jockey.jockeyName);
+      }
       for (const [season, agg] of seasons) {
         try {
           const top3 = agg.wins + agg.seconds + agg.thirds;
@@ -101,7 +112,7 @@ export function ingestJockeyRecords(
           const top3Rate = agg.rides > 0 ? top3 / agg.rides : 0;
           upsert.run(
             jockeySeasonId(agg.jockeyCode, season),
-            agg.jockeyCode,
+            `jockey_${agg.jockeyCode}`,
             season,
             agg.rides,
             agg.wins,

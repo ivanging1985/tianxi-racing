@@ -21,7 +21,8 @@
   },
   "dependencies": {
     "hkjc-api": "^1.0.5",
-    "hono": "^4.7.0"
+    "hono": "^4.7.0",
+    "mssql": "^12.7.4"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20260416.2",
