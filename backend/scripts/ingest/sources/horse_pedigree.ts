@@ -24,15 +24,17 @@ export interface PedigreeStats {
 export function ingestHorsePedigree(
   db: DB,
   csvPath: string,
-  _sourceCommit: string | null,
+  sourceCommit: string | null,
 ): PedigreeStats {
   db.exec(`
     CREATE TABLE IF NOT EXISTS horse_pedigree (
-      horse_id TEXT PRIMARY KEY,   -- 'horse_'+code, matches race_results.horse_id
-      code     TEXT,               -- bare HKJC code (horse_no)
-      sire     TEXT,               -- 父系
-      dam      TEXT,               -- 母系
-      dam_sire TEXT                -- 外祖父
+      horse_id TEXT PRIMARY KEY REFERENCES horses(id),
+      code TEXT,
+      sire TEXT,
+      dam TEXT,
+      dam_sire TEXT,
+      source_commit TEXT,
+      ingested_at TEXT DEFAULT (datetime('now'))
     );
     CREATE INDEX IF NOT EXISTS idx_pedigree_sire ON horse_pedigree(sire);
     CREATE INDEX IF NOT EXISTS idx_pedigree_damsire ON horse_pedigree(dam_sire);
@@ -42,12 +44,14 @@ export function ingestHorsePedigree(
   const stats: PedigreeStats = { inserted: 0, skipped: 0, failed: 0 };
 
   const upsert = db.prepare(
-    `INSERT INTO horse_pedigree (horse_id, code, sire, dam, dam_sire)
-     VALUES (?, ?, ?, ?, ?)
+    `INSERT INTO horse_pedigree (horse_id, code, sire, dam, dam_sire, source_commit, ingested_at)
+     VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
      ON CONFLICT(horse_id) DO UPDATE SET
        sire     = COALESCE(excluded.sire, horse_pedigree.sire),
        dam      = COALESCE(excluded.dam, horse_pedigree.dam),
-       dam_sire = COALESCE(excluded.dam_sire, horse_pedigree.dam_sire)`,
+       dam_sire = COALESCE(excluded.dam_sire, horse_pedigree.dam_sire),
+       source_commit = excluded.source_commit,
+       ingested_at = datetime('now')`,
   );
 
   const clean = (v: string | undefined): string | null => {
@@ -70,7 +74,7 @@ export function ingestHorsePedigree(
           stats.skipped++;
           continue;
         }
-        upsert.run(`horse_${code}`, code, sire, dam, damSire);
+        upsert.run(`horse_${code}`, code, sire, dam, damSire, sourceCommit);
         stats.inserted++;
       } catch (err) {
         stats.failed++;

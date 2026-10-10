@@ -37,15 +37,22 @@ function main() {
 
   const db = new Database(dbPath, { readonly: true });
   const manifest: string[] = [];
+  const manifestEntries: Array<{ table: string; file: string; conflictColumns: string[] }> = [];
 
   // --include selector: 'race' (default, fast post-race-day sync), 'pool-a' (trackwork/injury/form),
   // 'elo' (ELO snapshots only, for post-compute sync), 'entries' (forward-looking racecard
-  // upcoming meetings), or 'all' for everything.
+  // upcoming meetings), 'csv' (all imported source CSV datasets), or 'all' for everything.
   const include = (arg('include', 'race') || 'race').toLowerCase();
-  const wantRace    = include === 'race'    || include === 'all';
-  const wantPoolA   = include === 'pool-a'  || include === 'all';
+  const format = (arg('format', 'sql') || 'sql').toLowerCase();
+  if (format !== 'sql' && format !== 'jsonl') {
+    console.error(`invalid --format: ${format} (expected sql or jsonl)`);
+    process.exit(2);
+  }
+  const wantCsv     = include === 'csv';
+  const wantRace    = include === 'race'    || include === 'all' || wantCsv;
+  const wantPoolA   = include === 'pool-a'  || include === 'all' || wantCsv;
   const wantElo     = include === 'elo'     || include === 'all';
-  const wantEntries = include === 'entries' || include === 'all';
+  const wantEntries = include === 'entries' || include === 'all' || wantCsv;
   const wantOdds    = include === 'odds'    || include === 'all';
 
   // Table definitions with date-scoping filters
@@ -71,6 +78,8 @@ function main() {
   const HK_VENUE_FILTER = `venue IN ('ST','HV')`;
   const validRaceMeetingIds = `SELECT id FROM race_meetings WHERE date >= '${since}' AND ${HK_VENUE_FILTER} AND (SELECT COUNT(*) FROM races r2 WHERE r2.meeting_id = race_meetings.id) NOT BETWEEN 1 AND ${MIN_RACES_PER_MEETING - 1}`;
   const recentRaceIds = `SELECT id FROM races WHERE meeting_id IN (${validRaceMeetingIds})`;
+  const canonicalHorseId =
+    "CASE WHEN horse_id LIKE 'horse_%' THEN horse_id ELSE 'horse_' || horse_id END";
 
   if (wantRace) {
     const skipped = db.prepare(
@@ -86,24 +95,29 @@ function main() {
   // Horses/jockeys/trainers need to union refs from race_results AND pool-a tables
   // (otherwise FK fails when a trackwork row references a horse not in recent races)
   const horseRefs: string[] = [];
-  if (wantRace)  horseRefs.push(`SELECT DISTINCT horse_id FROM race_results WHERE race_id IN (${recentRaceIds})`);
+  if (wantRace) horseRefs.push(`SELECT DISTINCT ${canonicalHorseId} FROM race_results WHERE race_id IN (${recentRaceIds})`);
   if (wantPoolA) {
-    horseRefs.push(`SELECT DISTINCT horse_id FROM horse_trackwork WHERE trackwork_date >= '${since}'`);
-    horseRefs.push(`SELECT DISTINCT horse_id FROM horse_injury WHERE injury_date >= '${since}'`);
-    horseRefs.push(`SELECT DISTINCT horse_id FROM horse_form_records WHERE race_date >= '${since}'`);
+    horseRefs.push(`SELECT DISTINCT ${canonicalHorseId} FROM horse_trackwork WHERE trackwork_date >= '${since}'`);
+    horseRefs.push(`SELECT DISTINCT ${canonicalHorseId} FROM horse_injury WHERE injury_date >= '${since}'`);
+    horseRefs.push(`SELECT DISTINCT ${canonicalHorseId} FROM horse_form_records WHERE race_date >= '${since}'`);
     horseRefs.push(
-      `SELECT DISTINCT horse_id FROM horse_profile_extra
+      `SELECT DISTINCT ${canonicalHorseId} FROM trial_runners
+       WHERE session_id IN (SELECT id FROM trial_sessions WHERE trial_date >= '${since}')`,
+    );
+    horseRefs.push(
+      `SELECT DISTINCT ${canonicalHorseId} FROM horse_profile_extra
        WHERE substr(COALESCE(profile_checked_at, profile_last_scraped, ''), 1, 10) >= '${since}'`,
     );
+    horseRefs.push(`SELECT DISTINCT ${canonicalHorseId} FROM horse_pedigree`);
   }
   if (wantElo) {
     // ELO snapshots store bare codes (K059). Prefix to 'horse_K059' to match horses.id.
-    horseRefs.push(`SELECT DISTINCT ('horse_' || horse_id) FROM horse_elo_snapshots WHERE as_of_date >= '${since}'`);
+    horseRefs.push(`SELECT DISTINCT ${canonicalHorseId} FROM horse_elo_snapshots WHERE as_of_date >= '${since}'`);
   }
   if (wantEntries) {
     // Entries seed horses.id as prefixed 'horse_<code>' via entries ingest stub.
     // Reference by that id directly so the horses push captures debut entrants.
-    horseRefs.push(`SELECT DISTINCT ('horse_' || horse_id) FROM entries_upcoming WHERE race_date >= '${since}' AND ${HK_VENUE_FILTER}`);
+    horseRefs.push(`SELECT DISTINCT ${canonicalHorseId} FROM entries_upcoming WHERE race_date >= '${since}' AND ${HK_VENUE_FILTER}`);
   }
   const horseRefUnion = horseRefs.length ? horseRefs.join(' UNION ') : `SELECT NULL WHERE 0`;
 
@@ -116,8 +130,17 @@ function main() {
     plan.push({ table: 'horses',   where: `id IN (${horseRefUnion})` });
   }
   if (wantRace) {
-    plan.push({ table: 'jockeys',  where: `id IN (SELECT DISTINCT jockey_id FROM race_results WHERE race_id IN (${recentRaceIds}))` });
+    const raceJockeys = `SELECT DISTINCT jockey_id FROM race_results WHERE race_id IN (${recentRaceIds})`;
+    const sourceJockeys = `SELECT DISTINCT jockey_id FROM jockey_season_records`;
+    plan.push({
+      table: 'jockeys',
+      where: `id IN (${wantPoolA ? `${raceJockeys} UNION ${sourceJockeys}` : raceJockeys})`,
+    });
     plan.push({ table: 'trainers', where: `id IN (SELECT DISTINCT trainer_id FROM race_results WHERE race_id IN (${recentRaceIds}))` });
+  }
+  if (wantPoolA && !wantRace) {
+    const sourceJockeys = `SELECT DISTINCT jockey_id FROM jockey_season_records`;
+    plan.push({ table: 'jockeys', where: `id IN (${sourceJockeys})` });
   }
   if (wantElo && !wantRace) {
     // ELO-only path: skip horses/jockeys/trainers re-push (they already exist in D1).
@@ -136,12 +159,21 @@ function main() {
     plan.push({ table: 'race_results',          where: `race_id IN (${recentRaceIds})` });
     plan.push({ table: 'running_comments',      where: `race_id IN (${recentRaceIds})` });
     plan.push({ table: 'dividends',             where: `race_id IN (${recentRaceIds})` });
+    plan.push({ table: 'horse_sectional_times', where: `race_id IN (${recentRaceIds})` });
+    plan.push({ table: 'sectional_times',       where: `race_id IN (${recentRaceIds})` });
+    plan.push({ table: 'race_videos',            where: `race_id IN (${recentRaceIds})` });
     plan.push({ table: 'horse_elo_snapshots',   where: `as_of_date >= '${since}' AND ('horse_' || horse_id) IN (SELECT id FROM horses)` });
     plan.push({ table: 'jockey_elo_snapshots',  where: `as_of_date >= '${since}' AND ('jockey_' || jockey_id) IN (SELECT id FROM jockeys)` });
     plan.push({ table: 'trainer_elo_snapshots', where: `as_of_date >= '${since}' AND ('trainer_' || trainer_id) IN (SELECT id FROM trainers)` });
   }
 
   if (wantPoolA) {
+    plan.push({ table: 'horse_pedigree', where: '1 = 1' });
+    plan.push({ table: 'trainer_profiles', where: '1 = 1' });
+    plan.push({ table: 'source_csv_rows', where: '1 = 1' });
+    plan.push({ table: 'jockey_season_records', where: '1 = 1' });
+    plan.push({ table: 'trial_sessions', where: `trial_date >= '${since}'` });
+    plan.push({ table: 'trial_runners', where: `session_id IN (SELECT id FROM trial_sessions WHERE trial_date >= '${since}')` });
     plan.push({
       table: 'horse_profile_extra',
       where: `substr(COALESCE(profile_checked_at, profile_last_scraped, ''), 1, 10) >= '${since}'`,
@@ -181,9 +213,12 @@ function main() {
     horse_trackwork: { horse_id: 'horse_' },
     horse_injury: { horse_id: 'horse_' },
     horse_form_records: { horse_id: 'horse_' },
+    trial_runners: { horse_id: 'horse_' },
     // Profiles are canonical after ingest; keep this as a final guard for
     // legacy scratch databases that still contain a bare HKJC code.
     horse_profile_extra: { horse_id: 'horse_' },
+    horse_pedigree: { horse_id: 'horse_' },
+    jockey_season_records: { jockey_id: 'jockey_' },
     // Entries ingest writes bare code (E436) into horse_id; prefix for FK.
     entries_upcoming: { horse_id: 'horse_' },
   };
@@ -259,8 +294,25 @@ function main() {
     for (let i = 0; i < rows.length; i += rowsPerStatement * statementsPerChunk) {
       const chunkRows = rows.slice(i, i + rowsPerStatement * statementsPerChunk);
       const stmts: string[] = [];
+      const jsonRows: string[] = [];
       for (let j = 0; j < chunkRows.length; j += rowsPerStatement) {
         const batch = chunkRows.slice(j, j + rowsPerStatement);
+        if (format === 'jsonl') {
+          for (const row of batch) {
+            const output: Record<string, unknown> = {};
+            for (const column of cols) {
+              const value = row[column];
+              output[column] =
+                prefixMap[column] && value !== null && value !== undefined
+                  ? String(value).startsWith(prefixMap[column])
+                    ? value
+                    : `${prefixMap[column]}${String(value)}`
+                  : value;
+            }
+            jsonRows.push(JSON.stringify(output));
+          }
+          continue;
+        }
         const valuesSql = batch.map(r => {
           const vals = cols.map(c => {
             const v = r[c];
@@ -316,15 +368,17 @@ function main() {
           }
         }
       }
-      const fn = join(outDir, `${table}-${String(chunkIdx).padStart(4, '0')}.sql`);
-      writeFileSync(fn, stmts.join('\n') + '\n');
+      const extension = format === 'jsonl' ? 'jsonl' : 'sql';
+      const fn = join(outDir, `${table}-${String(chunkIdx).padStart(4, '0')}.${extension}`);
+      writeFileSync(fn, format === 'jsonl' ? jsonRows.join('\n') + '\n' : stmts.join('\n') + '\n');
       manifest.push(fn);
+      manifestEntries.push({ table, file: fn.slice(outDir.length + 1), conflictColumns: conflictCols });
       chunkIdx++;
     }
   }
 
-  console.log(manifest.join('\n'));
+  writeFileSync(join(outDir, 'manifest.json'), JSON.stringify(manifestEntries, null, 2) + '\n');
+  console.log(format === 'jsonl' ? `Wrote ${manifest.length} JSONL chunks.` : manifest.join('\n'));
 }
 
 main();
-

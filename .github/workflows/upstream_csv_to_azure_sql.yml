@@ -1,0 +1,153 @@
+name: Sync upstream CSVs to Azure SQL
+
+on:
+  schedule:
+    - cron: '30 18 * * *' # 02:30 Hong Kong time
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: upstream-csv-to-azure-sql
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - name: Checkout this fork for the import pipeline
+        uses: actions/checkout@v4
+        with:
+          path: pipeline
+          fetch-depth: 1
+
+      - name: Checkout the public CSV source
+        uses: actions/checkout@v4
+        with:
+          repository: sleepingarhat/tianxi-racing
+          ref: main
+          path: upstream
+          fetch-depth: 1
+
+      - name: Record upstream source revision
+        id: source
+        run: echo "sha=$(git -C upstream rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: pipeline/backend/package-lock.json
+
+      - name: Install pipeline dependencies
+        working-directory: pipeline/backend
+        run: npm ci --no-audit --no-fund
+
+      - name: Import all source CSVs into a local scratch database
+        working-directory: pipeline/backend
+        run: |
+          set -euo pipefail
+          rm -f bulk-local.db bulk-local.db-shm bulk-local.db-wal
+          npx tsx scripts/ingest/index.ts all \
+            --data-dir=../../upstream \
+            --db=bulk-local.db
+          npx tsx scripts/import-csv.ts \
+            --data-dir ../../upstream/data \
+            --db bulk-local.db
+
+      - name: Sign in to Azure
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Temporarily allow this runner through the Azure SQL firewall
+        id: firewall
+        env:
+          RESOURCE_GROUP: ${{ secrets.AZURE_RESOURCE_GROUP }}
+          SQL_SERVER_NAME: ${{ secrets.AZURE_SQL_SERVER_NAME }}
+        run: |
+          set -euo pipefail
+          runner_ip=$(curl --fail --silent --show-error https://api.ipify.org)
+          rule_name="gha-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          az sql server firewall-rule create \
+            --resource-group "$RESOURCE_GROUP" \
+            --server "$SQL_SERVER_NAME" \
+            --name "$rule_name" \
+            --start-ip-address "$runner_ip" \
+            --end-ip-address "$runner_ip" \
+            --only-show-errors
+          echo "rule_name=$rule_name" >> "$GITHUB_OUTPUT"
+
+      - name: Check Azure SQL schema and seed state
+        id: mode
+        working-directory: pipeline/backend
+        env:
+          AZURE_SQL_SERVER: ${{ secrets.AZURE_SQL_SERVER }}
+          AZURE_SQL_DATABASE: ${{ secrets.AZURE_SQL_DATABASE }}
+          AZURE_SQL_USER: ${{ secrets.AZURE_SQL_USER }}
+          AZURE_SQL_PASSWORD: ${{ secrets.AZURE_SQL_PASSWORD }}
+        run: |
+          set -euo pipefail
+          result=$(npx tsx scripts/azure-sql-sync.ts --db=bulk-local.db --status)
+          seeded="${result##*seeded=}"
+          if [[ "$seeded" == "true" ]]; then
+            echo "bootstrap=false" >> "$GITHUB_OUTPUT"
+            echo "Azure SQL has a completed upstream seed; running incremental sync."
+          elif [[ "$seeded" == "false" ]]; then
+            echo "bootstrap=true" >> "$GITHUB_OUTPUT"
+            echo "No completed upstream seed found; seeding all supported source CSV data."
+          else
+            echo "::error::Could not determine Azure SQL seed state."
+            exit 1
+          fi
+
+      - name: Generate full seed or 30-day delta data
+        working-directory: pipeline/backend
+        env:
+          BOOTSTRAP: ${{ steps.mode.outputs.bootstrap }}
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/azure-sql-delta
+          if [[ "$BOOTSTRAP" == "true" ]]; then
+            SINCE=2000-01-01
+          else
+            SINCE=$(TZ=Asia/Hong_Kong date -d '30 days ago' +%Y-%m-%d)
+          fi
+          echo "Syncing source records from $SINCE"
+          npx tsx scripts/push-delta.ts \
+            --db=bulk-local.db \
+            --since="$SINCE" \
+            --include=csv \
+            --format=jsonl \
+            --out=/tmp/azure-sql-delta
+          du -sh /tmp/azure-sql-delta
+
+      - name: Upsert records into Azure SQL
+        working-directory: pipeline/backend
+        env:
+          AZURE_SQL_SERVER: ${{ secrets.AZURE_SQL_SERVER }}
+          AZURE_SQL_DATABASE: ${{ secrets.AZURE_SQL_DATABASE }}
+          AZURE_SQL_USER: ${{ secrets.AZURE_SQL_USER }}
+          AZURE_SQL_PASSWORD: ${{ secrets.AZURE_SQL_PASSWORD }}
+          UPSTREAM_SHA: ${{ steps.source.outputs.sha }}
+        run: |
+          set -euo pipefail
+          npx tsx scripts/azure-sql-sync.ts \
+            --db=bulk-local.db \
+            --input-dir=/tmp/azure-sql-delta
+
+      - name: Remove temporary Azure SQL firewall access
+        if: ${{ always() && steps.firewall.outputs.rule_name != '' }}
+        env:
+          RESOURCE_GROUP: ${{ secrets.AZURE_RESOURCE_GROUP }}
+          SQL_SERVER_NAME: ${{ secrets.AZURE_SQL_SERVER_NAME }}
+          RULE_NAME: ${{ steps.firewall.outputs.rule_name }}
+        run: |
+          az sql server firewall-rule delete \
+            --resource-group "$RESOURCE_GROUP" \
+            --server "$SQL_SERVER_NAME" \
+            --name "$RULE_NAME" \
+            --only-show-errors

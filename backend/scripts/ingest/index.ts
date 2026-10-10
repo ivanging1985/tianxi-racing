@@ -13,6 +13,8 @@
  *   injury          — horses/injury/injury_*.csv → horse_injury
  *   trials          — trials/trial_sessions.csv + trial_results.csv → trial_sessions + trial_runners
  *   jockeys         — jockeys/records/jockey_*.csv → jockey_season_records
+ *   trainers        — trainers/trainer_profiles.csv → trainer_profiles
+ *   csv-archive     — fixtures, jockey profiles/records, and trainer records → source_csv_rows
  *   entries         — entries/entries_*.txt → entries_upcoming
  *   sync            — update sync_state from hkjc-data/last_sync.json
  *   all             — run everything
@@ -33,6 +35,8 @@ import { ingestJockeyRecords } from './sources/jockey_records.js';
 import { ingestEntries } from './sources/entries.js';
 import { ingestHorseTrackwork } from './sources/horse_trackwork.js';
 import { ingestHorseInjury } from './sources/horse_injury.js';
+import { ingestTrainerProfiles } from './sources/trainer_profiles.js';
+import { ingestSourceCsvRows } from './sources/csv_archive.js';
 
 interface Args {
   sources: string[];
@@ -245,6 +249,45 @@ async function main(): Promise<void> {
     }
   }
 
+  // ---- trainer profiles ----
+  if (wants('trainers')) {
+    const csv = resolve(args.dataDir, 'trainers', 'trainer_profiles.csv');
+    if (existsSync(csv)) {
+      const runId = startIngestionRun(db, 'trainer_profiles', sourceCommit);
+      const t0 = Date.now();
+      try {
+        const stats = args.dryRun
+          ? { inserted: 0, updated: 0, skipped: 0, failed: 0 }
+          : ingestTrainerProfiles(db, csv, sourceCommit);
+        const ms = Date.now() - t0;
+        finishIngestionRun(db, runId, { ...stats, notes: `${ms}ms` }, true);
+        log('trainers', `ins=${stats.inserted} upd=${stats.updated} skip=${stats.skipped} fail=${stats.failed} ${ms}ms`);
+      } catch (err) {
+        finishIngestionRun(db, runId, { inserted: 0, updated: 0, skipped: 0, failed: 0, notes: String(err) }, false);
+        console.error('[trainers] fatal:', err);
+      }
+    } else {
+      log('trainers', `CSV not found: ${csv}`);
+    }
+  }
+
+  // ---- source CSV rows without a normalized table ----
+  if (wants('csv-archive')) {
+    const runId = startIngestionRun(db, 'csv_archive', sourceCommit);
+    const t0 = Date.now();
+    try {
+      const stats = args.dryRun
+        ? { inserted: 0, updated: 0, skipped: 0, failed: 0, filesProcessed: 0 }
+        : ingestSourceCsvRows(db, args.dataDir, sourceCommit);
+      const ms = Date.now() - t0;
+      finishIngestionRun(db, runId, { ...stats, notes: `${stats.filesProcessed} files, ${ms}ms` }, true);
+      log('csv-archive', `files=${stats.filesProcessed} rows=${stats.inserted} fail=${stats.failed} ${ms}ms`);
+    } catch (err) {
+      finishIngestionRun(db, runId, { inserted: 0, updated: 0, skipped: 0, failed: 0, notes: String(err) }, false);
+      console.error('[csv-archive] fatal:', err);
+    }
+  }
+
   // ---- horse trackwork ----
   if (wants('trackwork')) {
     const dir = resolve(args.dataDir, 'horses', 'trackwork');
@@ -311,7 +354,14 @@ async function main(): Promise<void> {
     }
   }
 
+  const failedRuns = db.prepare(
+    `SELECT COUNT(*) AS count FROM ingestion_runs WHERE success = 0 OR rows_failed > 0`,
+  ).get() as { count: number };
   db.close();
+  if (failedRuns.count > 0) {
+    console.error(`[cli] ${failedRuns.count} ingestion run(s) failed or contained rejected rows`);
+    process.exitCode = 1;
+  }
   log('cli', 'done');
 }
 

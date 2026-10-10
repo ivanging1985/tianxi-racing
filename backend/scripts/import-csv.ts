@@ -691,6 +691,10 @@ function main() {
   console.log(`影片連結:         ${final.videos}`);
 
   db.close();
+  if (stats.errors > 0) {
+    console.error(`CSV import failed for ${stats.errors} race day(s)`);
+    process.exitCode = 1;
+  }
 }
 
 main();

@@ -45,6 +45,19 @@ CREATE TABLE IF NOT EXISTS horse_profile_extra (
 CREATE INDEX IF NOT EXISTS idx_hpx_last_scraped ON horse_profile_extra(profile_last_scraped);
 CREATE INDEX IF NOT EXISTS idx_hpx_status ON horse_profile_extra(status);
 
+CREATE TABLE IF NOT EXISTS horse_pedigree (
+  horse_id TEXT PRIMARY KEY REFERENCES horses(id),
+  code TEXT,
+  sire TEXT,
+  dam TEXT,
+  dam_sire TEXT,
+  source_commit TEXT,
+  ingested_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_pedigree_sire ON horse_pedigree(sire);
+CREATE INDEX IF NOT EXISTS idx_pedigree_damsire ON horse_pedigree(dam_sire);
+
 -- =============================================
 -- 二、馬匹 form records（逐場詳細 log）
 -- =============================================
@@ -170,6 +183,21 @@ CREATE TABLE IF NOT EXISTS jockey_season_records (
 
 CREATE INDEX IF NOT EXISTS idx_jsr_season ON jockey_season_records(season);
 CREATE INDEX IF NOT EXISTS idx_jsr_jockey ON jockey_season_records(jockey_id);
+
+CREATE TABLE IF NOT EXISTS trainer_profiles (
+  trainer_code TEXT PRIMARY KEY,
+  trainer_name TEXT NOT NULL,
+  source_commit TEXT,
+  ingested_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS source_csv_rows (
+  source_path TEXT NOT NULL,
+  row_number INTEGER NOT NULL,
+  row_json TEXT NOT NULL,
+  source_commit TEXT,
+  PRIMARY KEY (source_path, row_number)
+);
 
 -- =============================================
 -- 六、試閘 sessions + results 分開
