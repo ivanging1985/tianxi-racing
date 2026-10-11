@@ -1,27 +1,32 @@
 {
-  "scan_date": "2026-10-09",
+  "scan_date": "2026-10-11",
   "repo_root": "/home/runner/work/tianxi-racing/tianxi-racing",
   "overall_severity": "critical",
-  "critical_gap_count": 1,
-  "warn_gap_count": 12,
+  "critical_gap_count": 11,
+  "warn_gap_count": 7,
   "recommendation": "gha_next_delta_will_fix",
   "categories": {
     "race_artefacts": {
       "name": "race_artefacts",
-      "expected": 765,
+      "expected": 770,
       "present": 760,
       "missing": [
         "results_2026-09-20",
         "commentary_2026-09-20",
         "dividends_2026-09-20",
         "sectional_times_2026-09-20",
-        "video_links_2026-09-20"
+        "video_links_2026-09-20",
+        "results_2026-10-11",
+        "commentary_2026-10-11",
+        "dividends_2026-10-11",
+        "sectional_times_2026-10-11",
+        "video_links_2026-10-11"
       ],
       "stale": [],
       "notes": [
-        "days with any missing artefact: 1"
+        "days with any missing artefact: 2"
       ],
-      "severity": "warn"
+      "severity": "critical"
     },
     "fixtures_cache": {
       "name": "fixtures_cache",
@@ -36,8 +41,8 @@
     },
     "horse_profiles": {
       "name": "horse_profiles",
-      "expected": 1194,
-      "present": 1194,
+      "expected": 1185,
+      "present": 1185,
       "missing": [],
       "stale": [],
       "notes": [
@@ -47,8 +52,8 @@
     },
     "horse_form_records": {
       "name": "horse_form_records",
-      "expected": 1194,
-      "present": 1194,
+      "expected": 1185,
+      "present": 1185,
       "missing": [],
       "stale": [],
       "notes": [
@@ -114,7 +119,7 @@
       "missing": [],
       "stale": [],
       "notes": [
-        "trial rows: 9274"
+        "trial rows: 9327"
       ],
       "severity": "ok"
     },
